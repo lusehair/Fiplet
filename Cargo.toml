@@ -1,0 +1,25 @@
+[package]
+name = "fip-menubar-light"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+block2 = "0.6"
+dirs = "6.0.0"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSView", "NSControl", "NSButton", "NSTextField", "NSWindow", "NSText", "NSCell", "NSButtonCell", "NSMenu", "NSMenuItem", "NSGraphics", "NSEvent", "block2", "NSRunningApplication", "objc2-core-foundation", "NSImageView", "NSImage", "NSImageCell", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSTimer", "NSRunLoop", "NSThread", "NSGeometry", "NSObject", "NSNotification", "NSData", "NSDictionary", "NSValue", "NSArray", "NSLocale"] }
+objc2-media-player = { version = "0.3.2", default-features = false, features = ["std", "MPRemoteCommandCenter", "MPRemoteCommand", "MPRemoteCommandEvent", "MPNowPlayingInfoCenter", "MPMediaItem", "block2", "objc2-app-kit", "objc2-core-foundation"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "symphonia-aac", "symphonia-isomp4"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+ureq = { version = "3.3.0", features = ["json"] }
+
+# Lightweight binary.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

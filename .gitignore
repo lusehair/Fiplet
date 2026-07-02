@@ -1,0 +1,8 @@
+# Rust build output
+/target
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Note: FIP.app is intentionally tracked (a prebuilt bundle is committed).
