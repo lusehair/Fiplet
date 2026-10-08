@@ -16,12 +16,13 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
     NSButton, NSControlStateValueOff, NSControlStateValueOn, NSImage, NSImageScaling, NSImageView,
-    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSStatusBar, NSStatusItem,
-    NSTextAlignment, NSTextField, NSVariableStatusItemLength, NSView, NSWindow, NSWindowStyleMask,
+    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSSecureTextField, NSStatusBar,
+    NSStatusItem, NSTextAlignment, NSTextField, NSVariableStatusItemLength, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSData, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSTimer,
+    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 use objc2_media_player::{
     MPMediaItemArtwork, MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork,
@@ -74,7 +75,7 @@ struct Ivars {
     last_fav_click: RefCell<Option<(isize, Instant)>>,
     status_item: Retained<NSStatusItem>,
     settings_window: Retained<NSWindow>,
-    token_field: Retained<NSTextField>,
+    token_field: Retained<NSSecureTextField>,
     login_item_checkbox: Retained<NSButton>,
     mtm: MainThreadMarker,
 }
@@ -149,10 +150,11 @@ define_class!(
                 ..config::load_settings()
             };
             if let Err(e) = config::save_settings(&settings) {
-                eprintln!("paramètres: échec d'écriture : {e}");
+                eprintln!("settings: failed to save: {e}");
             }
             iv.settings_window.close();
-            // The key may have just been entered: enable (or disable) track display.
+            // The key may have just been entered or removed: re-poll so FIP
+            // Cultes / the GraphQL fallback pick it up right away.
             let station = iv.state.borrow().current_station;
             self.refresh_meta(station);
         }
@@ -233,6 +235,9 @@ impl Controller {
             st.current_station = i;
             st.paused = !play;
             st.now = None;
+            // Drop the previous station's cover too, or Now Playing would keep
+            // publishing it under the new station's name.
+            st.artwork = None;
         }
         self.update_station_check();
         self.refresh_like_button();
@@ -245,8 +250,13 @@ impl Controller {
             let _ = iv
                 .audio_tx
                 .send(AudioCmd::PlayStream(STATIONS[i].stream_url.to_string()));
+            self.refresh_meta(i);
+        } else {
+            // Paused (e.g. login-item launch): don't poll the API for events the
+            // UI would ignore anyway, and don't show a misleading "Loading…".
+            let _ = iv.meta_tx.send(MetaCmd::Pause);
+            iv.title.setStringValue(&s(""));
         }
-        self.refresh_meta(i);
         self.update_now_playing();
     }
 
@@ -270,7 +280,7 @@ impl Controller {
                 }
             }
             Err(e) => {
-                eprintln!("lancement au démarrage: échec : {e}");
+                eprintln!("launch at login: failed: {e}");
                 // Reflect the actual system state rather than the failed click.
                 iv.login_item_checkbox.setState(if login_item_enabled() {
                     NSControlStateValueOn
@@ -305,7 +315,7 @@ impl Controller {
                 iv.like_btn.setTitle(&s("✓"));
             }
             Ok(None) => {}
-            Err(e) => eprintln!("like: échec d'écriture : {e}"),
+            Err(e) => eprintln!("likes: failed to save: {e}"),
         }
     }
 
@@ -412,43 +422,46 @@ impl Controller {
         }
     }
 
-    /// Enables track display only if the user has entered their API key;
-    /// otherwise, playback only (title/artist hidden).
+    /// (Re)starts track polling for `station`. No API key is required: the
+    /// poller uses the public `livemeta` API, and the key (if any) for FIP
+    /// Cultes and as a fallback.
     fn refresh_meta(&self, station: usize) {
         let iv = self.ivars();
-        if config::has_user_token() {
-            let _ = iv.meta_tx.send(MetaCmd::Switch(station));
-            iv.title.setStringValue(&s(tr("Chargement…", "Loading…")));
-        } else {
-            let _ = iv.meta_tx.send(MetaCmd::Pause);
-            iv.title.setStringValue(&s(""));
-            iv.artist.setStringValue(&s(""));
-            iv.cover.setHidden(true);
-            iv.cover.setImage(None);
-        }
+        let _ = iv.meta_tx.send(MetaCmd::Switch(station));
+        iv.title.setStringValue(&s(tr("Chargement…", "Loading…")));
     }
 
     fn toggle_pause(&self) {
+        let paused = self.ivars().state.borrow().paused;
+        self.set_paused(!paused);
+    }
+
+    /// Pauses or resumes playback; no-op if already in the requested state
+    /// (so a stray "pause" from Control Center never starts playback).
+    fn set_paused(&self, paused: bool) {
         let iv = self.ivars();
-        let mut st = iv.state.borrow_mut();
-        st.paused = !st.paused;
-        if st.paused {
-            let _ = iv.audio_tx.send(AudioCmd::TogglePause);
+        // Release the RefCell borrow before any AppKit call.
+        let station = {
+            let mut st = iv.state.borrow_mut();
+            if st.paused == paused {
+                return;
+            }
+            st.paused = paused;
+            st.current_station
+        };
+        if paused {
+            let _ = iv.audio_tx.send(AudioCmd::Pause);
             let _ = iv.meta_tx.send(MetaCmd::Pause);
             iv.play_btn.setTitle(&s("▶"));
-            drop(st);
-            self.update_now_playing();
         } else {
             // Resume: reconnect to the live stream to resync audio and track.
-            let i = st.current_station;
             let _ = iv
                 .audio_tx
-                .send(AudioCmd::PlayStream(STATIONS[i].stream_url.to_string()));
+                .send(AudioCmd::PlayStream(STATIONS[station].stream_url.to_string()));
             iv.play_btn.setTitle(&s("⏸"));
-            drop(st);
-            self.refresh_meta(i);
-            self.update_now_playing();
+            self.refresh_meta(station);
         }
+        self.update_now_playing();
     }
 
     fn handle_event(&self, ev: AppEvent) {
@@ -466,7 +479,13 @@ impl Controller {
                         .setStringValue(&s(if np.artist.is_empty() { "—" } else { &np.artist }));
                     iv.cover.setHidden(true);
                     iv.cover.setImage(None);
-                    iv.state.borrow_mut().now = Some(np);
+                    {
+                        let mut st = iv.state.borrow_mut();
+                        st.now = Some(np);
+                        // The old cover must not linger in Control Center if
+                        // no artwork is found for the new track.
+                        st.artwork = None;
+                    }
                     self.refresh_like_button();
                     self.update_now_playing();
                 }
@@ -487,9 +506,16 @@ impl Controller {
                     self.update_now_playing();
                 }
             }
-            AppEvent::Cover { station_index, jpeg } => {
-                let current = iv.state.borrow().current_station;
-                if station_index == current {
+            AppEvent::Cover { station_index, key, jpeg } => {
+                // Only apply a cover to the track it was fetched for: a slow
+                // download must not land on the next track (or on the same
+                // station after an A→B→A switch).
+                let matches = {
+                    let st = iv.state.borrow();
+                    station_index == st.current_station
+                        && st.now.as_ref().map(|np| np.dedup_key()) == Some(key)
+                };
+                if matches {
                     let data = NSData::with_bytes(&jpeg);
                     if let Some(img) = NSImage::initWithData(iv.mtm.alloc(), &data) {
                         iv.cover.setImage(Some(&img));
@@ -512,7 +538,26 @@ impl Controller {
                 let station = iv.state.borrow().current_station;
                 self.refresh_meta(station);
             }
+            AppEvent::ApiError { unauthorized, detail } => {
+                eprintln!("metadata: {detail}");
+                if !iv.state.borrow().paused {
+                    iv.title.setStringValue(&s(if unauthorized {
+                        tr("Clé API invalide — voir ⚙", "Invalid API key — see ⚙")
+                    } else {
+                        tr("Erreur API", "API error")
+                    }));
+                    iv.artist.setStringValue(&s(""));
+                }
+            }
+            AppEvent::AudioUnavailable => {
+                iv.title
+                    .setStringValue(&s(tr("Sortie audio indisponible", "No audio output")));
+                iv.artist.setStringValue(&s(""));
+                iv.play_btn.setEnabled(false);
+            }
             AppEvent::MediaPlayPause => self.toggle_pause(),
+            AppEvent::MediaPlay => self.set_paused(false),
+            AppEvent::MediaPause => self.set_paused(true),
             AppEvent::MediaNext => {
                 let (c, n) = {
                     let st = iv.state.borrow();
@@ -557,7 +602,7 @@ impl Controller {
         let mut vals: Vec<&AnyObject> = vec![&*title_ns, &*artist_ns, &*rate_num];
 
         // Cover art, if we have it (shown in Control Center / on the lock screen).
-        let artwork = artwork_img.as_ref().map(|img| make_artwork(img));
+        let artwork = artwork_img.as_ref().map(make_artwork);
         if let Some(art) = artwork.as_ref() {
             keys.push(unsafe { MPMediaItemPropertyArtwork });
             vals.push(&**art);
@@ -579,7 +624,7 @@ impl Controller {
 
 /// Starts the native application (does not return).
 pub fn run() {
-    let mtm = MainThreadMarker::new().expect("ui::run doit être appelé sur le thread principal");
+    let mtm = MainThreadMarker::new().expect("ui::run must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
@@ -733,13 +778,18 @@ pub fn run() {
             iv.login_item_checkbox.setTarget(Some(target));
             iv.login_item_checkbox
                 .setAction(Some(sel!(toggleLoginItem:)));
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            // `scheduledTimer…` would only fire in the default run-loop mode,
+            // i.e. NOT while a menu is open (event-tracking mode) — exactly
+            // when the user is looking at the mini-player. Register it in the
+            // common modes so track/cover/offline updates keep flowing.
+            let timer = NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
                 0.25,
                 target,
                 sel!(tick:),
                 None,
                 true,
             );
+            NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
         }
     }
 
@@ -750,8 +800,8 @@ pub fn run() {
     // or an automatic session-startup launch (login item) — stay silent.
     controller.select_station(start_station, false);
 
-    // First launch (no settings.json yet): open Settings to enter the API key.
-    // Once saved, the window no longer reopens.
+    // First launch (no settings.json yet): open Settings once (optional API
+    // key, launch at login). Once saved, the window no longer reopens.
     if config::needs_onboarding() {
         controller.show_settings();
     }
@@ -772,7 +822,7 @@ fn build_settings_window(
     mtm: MainThreadMarker,
 ) -> (
     Retained<NSWindow>,
-    Retained<NSTextField>,
+    Retained<NSSecureTextField>,
     Retained<NSButton>,
     Retained<NSButton>,
 ) {
@@ -783,11 +833,14 @@ fn build_settings_window(
 
     let token_label = make_left_label(
         mtm,
-        tr("Clé API Open FIP :", "Open FIP API key:"),
+        tr(
+            "Clé API Open FIP (optionnelle : FIP Cultes et secours) :",
+            "Open FIP API key (optional: FIP Cultes and fallback):",
+        ),
         rect(20.0, 14.0, 400.0, 18.0),
     );
-    let token_field = NSTextField::textFieldWithString(&s(""), mtm);
-    token_field.setFrame(rect(20.0, 36.0, 400.0, 24.0));
+    // Secure field: the key is a credential, don't display it in clear.
+    let token_field = NSSecureTextField::initWithFrame(mtm.alloc(), rect(20.0, 36.0, 400.0, 24.0));
     let login_item_checkbox = unsafe {
         NSButton::checkboxWithTitle_target_action(
             &s(tr("Lancer au démarrage de la session", "Launch at login")),
@@ -802,6 +855,8 @@ fn build_settings_window(
         tr("Enregistrer", "Save"),
         rect(330.0, 104.0, 90.0, 30.0),
     );
+    // Enter saves (default button), instead of silently doing nothing.
+    save_btn.setKeyEquivalent(&s("\r"));
 
     for v in [
         content_child(&token_label),

@@ -15,6 +15,9 @@ mod model;
 mod stations;
 mod ui;
 
+/// `User-Agent` sent with every HTTP request (API etiquette).
+pub const USER_AGENT: &str = concat!("Fiplet/", env!("CARGO_PKG_VERSION"));
+
 fn main() {
     ui::run();
 }

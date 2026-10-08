@@ -2,28 +2,38 @@
 //! in-process (`ureq` + symphonia via rodio). No local files, no ffmpeg.
 //!
 //! A small watchdog reconnects automatically if the live stream drops (network
-//! blip, server hiccup) and reports outages to the UI via [`AppEvent`].
+//! blip, server hiccup, decoder giving up) with an exponential backoff, and
+//! reports outages to the UI via [`AppEvent`].
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rodio::{Decoder, DeviceSinkBuilder, Player};
 
 use crate::model::AppEvent;
 
 /// Commands accepted by the audio thread.
+///
+/// Pause / resume are explicit (not a toggle): `rodio::Player::clear()` pauses
+/// the player as a side effect, so the player's own `is_paused()` cannot be
+/// used to infer what the *user* wants.
 pub enum AudioCmd {
-    /// Stops playback and starts the live stream (Icecast URL).
+    /// Stops playback and starts the live stream (Icecast URL). Also used to
+    /// resume: reconnecting resyncs audio with the live edge.
     PlayStream(String),
-    /// Toggles play / pause.
-    TogglePause,
+    /// Pauses playback and stops the watchdog from reconnecting.
+    Pause,
 }
 
 /// How often the watchdog wakes to check for a dropped stream.
 const WATCHDOG: Duration = Duration::from_secs(2);
+/// Reconnect backoff: first retry after `BACKOFF_MIN`, doubling up to
+/// `BACKOFF_MAX` while the stream keeps failing; reset on success.
+const BACKOFF_MIN: Duration = Duration::from_secs(2);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// Starts the audio thread and returns the command sender. `events` is used to
 /// report stream outages / recovery to the UI.
@@ -32,7 +42,7 @@ pub fn spawn(events: Sender<AppEvent>) -> Sender<AudioCmd> {
     std::thread::Builder::new()
         .name("audio".into())
         .spawn(move || run(rx, events))
-        .expect("démarrage du thread audio");
+        .expect("failed to spawn the audio thread");
     tx
 }
 
@@ -42,85 +52,115 @@ pub fn spawn(events: Sender<AppEvent>) -> Sender<AudioCmd> {
 fn http() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(8)))
+        .user_agent(crate::USER_AGENT)
         .build()
         .new_agent()
+}
+
+/// Mutable state of the audio thread, shared between the command handler and
+/// the watchdog.
+struct Session {
+    player: Player,
+    agent: ureq::Agent,
+    /// Set to `true` by `StreamReader` when the underlying HTTP stream ends or
+    /// errors, so the watchdog knows to reconnect.
+    ended: Arc<AtomicBool>,
+    current_url: Option<String>,
+    /// Whether the user wants audio (distinguishes a real outage from a pause).
+    should_play: bool,
+    /// Whether we last reported an outage (to emit each transition only once).
+    offline: bool,
+    /// Current backoff delay and the earliest time of the next reconnect.
+    backoff: Duration,
+    next_retry: Instant,
+    events: Sender<AppEvent>,
 }
 
 fn run(rx: Receiver<AudioCmd>, events: Sender<AppEvent>) {
     let handle = match DeviceSinkBuilder::open_default_sink() {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("audio: pas de sortie audio : {e}");
+            eprintln!("audio: no audio output: {e}");
+            let _ = events.send(AppEvent::AudioUnavailable);
             return;
         }
     };
     let player = Player::connect_new(handle.mixer());
     player.set_volume(1.0);
-    let agent = http();
 
-    // Set to `true` by `StreamReader` when the underlying HTTP stream ends or
-    // errors, so the watchdog knows to reconnect.
-    let ended = Arc::new(AtomicBool::new(false));
-    let mut current_url: Option<String> = None;
-    // Whether the user wants audio (distinguishes a real outage from a pause).
-    let mut should_play = false;
-    // Whether we last reported an outage (to emit each transition only once).
-    let mut offline = false;
+    let mut s = Session {
+        player,
+        agent: http(),
+        ended: Arc::new(AtomicBool::new(false)),
+        current_url: None,
+        should_play: false,
+        offline: false,
+        backoff: BACKOFF_MIN,
+        next_retry: Instant::now(),
+        events,
+    };
 
     loop {
         match rx.recv_timeout(WATCHDOG) {
             Ok(AudioCmd::PlayStream(url)) => {
-                current_url = Some(url.clone());
-                should_play = true;
-                connect(&agent, &player, &url, &ended, &events, &mut offline);
+                s.current_url = Some(url.clone());
+                s.should_play = true;
+                s.backoff = BACKOFF_MIN;
+                s.connect(&url);
             }
-            Ok(AudioCmd::TogglePause) => {
-                if player.is_paused() {
-                    player.play();
-                } else {
-                    player.pause();
-                }
-                should_play = !player.is_paused();
+            Ok(AudioCmd::Pause) => {
+                s.should_play = false;
+                s.player.pause();
             }
-            Err(RecvTimeoutError::Timeout) => {
-                // Auto-reconnect: we want audio, but the stream ended on its own.
-                if should_play && ended.load(Ordering::SeqCst) {
-                    if let Some(url) = current_url.clone() {
-                        connect(&agent, &player, &url, &ended, &events, &mut offline);
-                    }
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => s.watchdog(),
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
 
-/// (Re)connects to the live stream and updates the outage state, emitting an
-/// `AppEvent` only on transitions (offline ↔ online).
-fn connect(
-    agent: &ureq::Agent,
-    player: &Player,
-    url: &str,
-    ended: &Arc<AtomicBool>,
-    events: &Sender<AppEvent>,
-    offline: &mut bool,
-) {
-    player.clear();
-    ended.store(false, Ordering::SeqCst);
-    match play_stream(agent, player, url, ended.clone()) {
-        Ok(()) => {
-            if *offline {
-                *offline = false;
-                let _ = events.send(AppEvent::StreamOnline);
-            }
+impl Session {
+    /// Auto-reconnect: we want audio, but the stream ended on its own.
+    ///
+    /// `ended` covers HTTP EOF / I/O errors seen by our reader. `empty()`
+    /// covers the decoder giving up on its own (e.g. lost ADTS sync): rodio's
+    /// symphonia decoder ends the source on non-recoverable errors without
+    /// our reader ever seeing a failure.
+    fn watchdog(&mut self) {
+        if !self.should_play {
+            return;
         }
-        Err(e) => {
-            eprintln!("audio: flux impossible ({url}) : {e}");
-            // Leave `ended` set so the watchdog keeps retrying every tick.
-            ended.store(true, Ordering::SeqCst);
-            if !*offline {
-                *offline = true;
-                let _ = events.send(AppEvent::StreamOffline);
+        let dropped = self.ended.load(Ordering::SeqCst) || self.player.empty();
+        if !dropped || Instant::now() < self.next_retry {
+            return;
+        }
+        if let Some(url) = self.current_url.clone() {
+            self.connect(&url);
+        }
+    }
+
+    /// (Re)connects to the live stream and updates the outage state, emitting an
+    /// `AppEvent` only on transitions (offline ↔ online).
+    fn connect(&mut self, url: &str) {
+        self.player.clear();
+        self.ended.store(false, Ordering::SeqCst);
+        match play_stream(&self.agent, &self.player, url, self.ended.clone()) {
+            Ok(()) => {
+                self.backoff = BACKOFF_MIN;
+                if self.offline {
+                    self.offline = false;
+                    let _ = self.events.send(AppEvent::StreamOnline);
+                }
+            }
+            Err(e) => {
+                eprintln!("audio: cannot open stream ({url}): {e}, retrying in {:?}", self.backoff);
+                // Leave `ended` set so the watchdog keeps retrying (with backoff).
+                self.ended.store(true, Ordering::SeqCst);
+                self.next_retry = Instant::now() + self.backoff;
+                self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+                if !self.offline {
+                    self.offline = true;
+                    let _ = self.events.send(AppEvent::StreamOffline);
+                }
             }
         }
     }
@@ -140,6 +180,7 @@ fn play_stream(
         .with_seekable(false)
         .build()?;
     player.append(decoder);
+    // `clear()` (called before every connect) pauses the player: un-pause.
     player.play();
     Ok(())
 }

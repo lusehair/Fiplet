@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::config;
-use crate::model::NowPlaying;
+use crate::model::{NowPlaying, TrackKey};
 use crate::stations::STATIONS;
 
 /// A liked entry, as serialized in `likes.json`.
@@ -22,7 +22,7 @@ pub struct Like {
 
 impl Like {
     /// Case-insensitive deduplication key (artist, title).
-    pub fn key(&self) -> (String, String) {
+    pub fn key(&self) -> TrackKey {
         (self.artist.to_lowercase(), self.title.to_lowercase())
     }
 }
@@ -69,13 +69,13 @@ pub fn add(np: &NowPlaying) -> std::io::Result<Option<Like>> {
 
 /// Removes the liked track matching `key` (case-insensitive artist/title).
 /// Returns true if something was removed.
-pub fn remove_by_key(key: &(String, String)) -> bool {
+pub fn remove_by_key(key: &TrackKey) -> bool {
     let mut likes = all();
     let before = likes.len();
     likes.retain(|l| &l.key() != key);
     if likes.len() != before {
         if let Err(e) = save(&likes) {
-            eprintln!("like: échec de suppression : {e}");
+            eprintln!("likes: failed to remove: {e}");
             return false;
         }
         true
@@ -86,7 +86,7 @@ pub fn remove_by_key(key: &(String, String)) -> bool {
 
 fn save(likes: &[Like]) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(likes)?;
-    std::fs::write(config::likes_json_path(), json)
+    config::write_atomic(&config::likes_json_path(), &json)
 }
 
 fn now_secs() -> i64 {
@@ -94,4 +94,25 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn like_key_matches_now_playing_key_case_insensitively() {
+        let like = Like { title: "So What".into(), artist: "MILES Davis".into(), station: "FIP".into(), liked_at_unix: 0 };
+        let np = NowPlaying { title: "so what".into(), artist: "miles davis".into(), station_index: 0, cover_url: None };
+        assert_eq!(like.key(), np.dedup_key());
+    }
+
+    #[test]
+    fn likes_json_round_trip() {
+        let likes = vec![Like { title: "T".into(), artist: "A".into(), station: "FIP".into(), liked_at_unix: 42 }];
+        let json = serde_json::to_vec(&likes).unwrap();
+        let back: Vec<Like> = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].liked_at_unix, 42);
+    }
 }

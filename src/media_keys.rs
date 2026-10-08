@@ -30,8 +30,11 @@ pub fn install(tx: Sender<AppEvent>) {
         register(&center.togglePlayPauseCommand(), tx.clone(), || {
             AppEvent::MediaPlayPause
         });
-        register(&center.playCommand(), tx.clone(), || AppEvent::MediaPlayPause);
-        register(&center.pauseCommand(), tx.clone(), || AppEvent::MediaPlayPause);
+        // `play` / `pause` are *not* toggles: macOS sends a lone `pause` when
+        // headphones are unplugged or another app starts playing. Treating it
+        // as a toggle would start playback when already paused.
+        register(&center.playCommand(), tx.clone(), || AppEvent::MediaPlay);
+        register(&center.pauseCommand(), tx.clone(), || AppEvent::MediaPause);
         register(&center.nextTrackCommand(), tx.clone(), || AppEvent::MediaNext);
         register(&center.previousTrackCommand(), tx, || AppEvent::MediaPrev);
     }
