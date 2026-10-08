@@ -40,8 +40,8 @@ API key needed — plus a local **like**.
 - **Now playing**: title, artist and **cover art**, out of the box (no API key).
 - **Cover art in Control Center** and on the **lock screen**, plus hardware
   **media keys** (play/pause, next/previous station).
-- **♥ Like** the current track, and **remove** a favorite by **double-clicking**
-  it in the list.
+- **♥ Like** the current track; **click** a favorite in the list to **copy**
+  it, **double-click** it to **remove** it.
 - **⧉ Copy** the current track ("Artist — Title") to the clipboard.
 - **Remembers the last station** and reopens on it.
 - **Auto-reconnects** if the live stream drops, with an *"offline"* hint.
@@ -57,7 +57,8 @@ A **♪** icon in the menu bar opens a **menu** (`NSMenu`):
 - **Mini-player**: radio name + gear ⚙, cover art, title, artist, ▶/⏸, ♥ (like)
   and ⧉ (copy the current track).
 - **"Stations" submenu**: the 13 webradios (the current station is checkmarked).
-- **"Favorites (N)" submenu**: the liked tracks; **double-click** one to remove it.
+- **"Favorites (N)" submenu**: the liked tracks; **click** one to copy it
+  ("Artist — Title"), **double-click** it to remove it.
 - **Quit**.
 
 The interface is in English, or in French when the system language is French
@@ -116,8 +117,9 @@ live edge automatically** (with an exponential backoff, 2 s → 30 s) and shows 
 ## ♥ Like
 
 The ♥ button saves the current track to `likes.json`; saved tracks appear in the
-**"Favorites"** submenu. To **remove** one, **double-click** its row — a single
-click does nothing, so you can't delete by accident, and the menu stays open.
+**"Favorites"** submenu. **Click** a row to copy that track ("Artist — Title")
+to the clipboard; **double-click** it to **remove** it. A single click never
+deletes, so you can't remove a favorite by accident, and the menu stays open.
 
 The **⧉** button copies the current track ("Artist — Title", or just the title)
 to the clipboard.

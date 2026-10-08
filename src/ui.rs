@@ -327,19 +327,13 @@ impl Controller {
         if np.title.is_empty() {
             return;
         }
-        let text = if np.artist.is_empty() {
-            np.title
-        } else {
-            format!("{} — {}", np.artist, np.title)
-        };
-        let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        unsafe { pb.setString_forType(&s(&text), NSPasteboardTypeString) };
+        copy_to_clipboard(&track_text(&np.artist, &np.title));
     }
 
     /// Rebuilds the "Favorites" list view from the JSON. Each favorite is a
     /// borderless button (a clickable row that doesn't dismiss the menu);
-    /// double-clicking a row removes it (see `favorite_row_clicked`).
+    /// clicking a row copies it, double-clicking removes it (see
+    /// `favorite_row_clicked`).
     fn rebuild_fav_menu(&self) {
         let iv = self.ivars();
         let mtm = iv.mtm;
@@ -386,22 +380,25 @@ impl Controller {
             .setTitle(&s(&format!("{} ({})", tr("Favoris", "Favorites"), favs.len())));
     }
 
-    /// Handles a click on a favorite row. A single click arms the row; a second
-    /// click on the same row within `FAV_DOUBLE_CLICK` removes that favorite.
+    /// Handles a click on a favorite row. A single click copies the favorite
+    /// ("Artist — Title") to the clipboard and arms the row; a second click on
+    /// the same row within `FAV_DOUBLE_CLICK` removes that favorite.
     fn favorite_row_clicked(&self, tag: isize) {
         let now = Instant::now();
         let is_double = match *self.ivars().last_fav_click.borrow() {
             Some((prev, at)) => prev == tag && now.duration_since(at) < FAV_DOUBLE_CLICK,
             None => false,
         };
+        let Some(like) = likes::all().get(tag as usize).cloned() else {
+            return;
+        };
         if is_double {
             *self.ivars().last_fav_click.borrow_mut() = None;
-            if let Some(like) = likes::all().get(tag as usize) {
-                likes::remove_by_key(&like.key());
-                self.rebuild_fav_menu();
-            }
+            likes::remove_by_key(&like.key());
+            self.rebuild_fav_menu();
         } else {
             *self.ivars().last_fav_click.borrow_mut() = Some((tag, now));
+            copy_to_clipboard(&fav_text(&like));
         }
     }
 
@@ -990,10 +987,23 @@ fn make_button(mtm: MainThreadMarker, title: &str, frame: NSRect) -> Retained<NS
 }
 
 /// Label for a favorite in the submenu: "Artist — Title" (or just the title).
-fn fav_text(like: &Like) -> String {
-    if like.artist.is_empty() {
-        like.title.clone()
+/// "Artist — Title", or just the title when the artist is unknown. Used both
+/// for the favorites rows and for what gets copied to the clipboard.
+fn track_text(artist: &str, title: &str) -> String {
+    if artist.is_empty() {
+        title.to_string()
     } else {
-        format!("{} — {}", like.artist, like.title)
+        format!("{artist} — {title}")
     }
+}
+
+fn fav_text(like: &Like) -> String {
+    track_text(&like.artist, &like.title)
+}
+
+/// Replaces the clipboard contents with `text`.
+fn copy_to_clipboard(text: &str) {
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    unsafe { pb.setString_forType(&s(text), NSPasteboardTypeString) };
 }

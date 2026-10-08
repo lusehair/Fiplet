@@ -5,4 +5,7 @@
 .DS_Store
 **/.DS_Store
 
-# Note: FIP.app is intentionally tracked (a prebuilt bundle is committed).
+# App bundle: produced locally by ./bundle.sh, published via GitHub Releases
+# (see .github/workflows/release.yml). Not tracked: a binary in git cannot be
+# audited against the sources and bloats the history on every rebuild.
+/FIP.app
