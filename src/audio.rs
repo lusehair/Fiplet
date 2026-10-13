@@ -1,14 +1,19 @@
 //! Audio thread (light version): plays the live AAC Icecast stream decoded
 //! in-process (`ureq` + symphonia via rodio). No local files, no ffmpeg.
 //!
+//! The HTTP stream is read by a dedicated thread into a bounded queue, and
+//! playback starts only once a few seconds are buffered: rodio decodes inside
+//! the real-time audio callback, so reading the socket directly there turned
+//! every network hiccup into an audible skip.
+//!
 //! A small watchdog reconnects automatically if the live stream drops (network
 //! blip, server hiccup, decoder giving up) with an exponential backoff, and
 //! reports outages to the UI via [`AppEvent`].
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rodio::{Decoder, DeviceSinkBuilder, Player};
@@ -34,6 +39,16 @@ const WATCHDOG: Duration = Duration::from_secs(2);
 /// `BACKOFF_MAX` while the stream keeps failing; reset on success.
 const BACKOFF_MIN: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Size of the chunks read from the network by the fetch thread.
+const CHUNK: usize = 4 * 1024;
+/// Bytes buffered before playback starts (~4 s at the hifi 192 kbit/s rate):
+/// the margin that absorbs network jitter.
+const PREBUFFER: usize = 96 * 1024;
+/// Maximum time spent waiting for the prebuffer before starting anyway.
+const PREBUFFER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Capacity of the chunk queue (~1 MiB, ~45 s); TCP backpressure beyond that.
+const QUEUE_CHUNKS: usize = 256;
 
 /// Starts the audio thread and returns the command sender. `events` is used to
 /// report stream outages / recovery to the UI.
@@ -173,8 +188,28 @@ fn play_stream(
     ended: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let reader = agent.get(url).call()?.into_body().into_reader();
+    let (tx, rx) = mpsc::sync_channel(QUEUE_CHUNKS);
+    std::thread::Builder::new()
+        .name("audio-fetch".into())
+        .spawn(move || fetch(reader, tx))?;
+
+    // Prebuffer: fill the jitter margin before handing the stream to rodio.
+    let mut stream = StreamReader { rx: Mutex::new(rx), chunk: Vec::new(), pos: 0, ended };
+    let deadline = Instant::now() + PREBUFFER_TIMEOUT;
+    while stream.chunk.len() < PREBUFFER {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match stream.rx.get_mut().unwrap().recv_timeout(left) {
+            Ok(c) => stream.chunk.extend_from_slice(&c),
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) if stream.chunk.is_empty() => {
+                return Err("stream ended before any data".into());
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
     let decoder = Decoder::builder()
-        .with_data(StreamReader { inner: reader, ended })
+        .with_data(stream)
         .with_hint("aac")
         .with_mime_type("audio/aac")
         .with_seekable(false)
@@ -185,31 +220,65 @@ fn play_stream(
     Ok(())
 }
 
-/// Adapts an HTTP stream (read-only) to the decoder's `Read + Seek` interface.
-/// The stream is infinite and non-rewindable: `seek` fails (non-seekable decoder).
-/// End-of-stream or a read error flips `ended` so the audio thread reconnects.
-struct StreamReader<R> {
-    inner: R,
-    ended: Arc<AtomicBool>,
-}
-
-impl<R: Read> Read for StreamReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.inner.read(buf) {
-            Ok(0) => {
-                self.ended.store(true, Ordering::SeqCst);
-                Ok(0)
+/// Fetch thread: pumps the HTTP stream into the chunk queue. Exits on EOF /
+/// read error (dropping `tx` signals the end to the reader), or as soon as the
+/// reader is dropped (`clear()` on reconnect / station change).
+fn fetch(mut reader: impl Read, tx: SyncSender<Vec<u8>>) {
+    loop {
+        let mut buf = vec![0; CHUNK];
+        match reader.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                buf.truncate(n);
+                if tx.send(buf).is_err() {
+                    return;
+                }
             }
-            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
-                self.ended.store(true, Ordering::SeqCst);
-                Err(e)
+                eprintln!("audio: stream read error: {e}");
+                return;
             }
         }
     }
 }
 
-impl<R> Seek for StreamReader<R> {
+/// Adapts the buffered stream (read-only) to the decoder's `Read + Seek`
+/// interface. Reads are served from memory; they only block if the buffer has
+/// fully drained. The stream is infinite and non-rewindable: `seek` fails
+/// (non-seekable decoder). End-of-stream flips `ended` so the audio thread
+/// reconnects.
+struct StreamReader {
+    /// In a `Mutex` only to make the reader `Sync` (rodio requires it); always
+    /// accessed through `get_mut`, so never actually locked.
+    rx: Mutex<Receiver<Vec<u8>>>,
+    chunk: Vec<u8>,
+    pos: usize,
+    ended: Arc<AtomicBool>,
+}
+
+impl Read for StreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos == self.chunk.len() {
+            match self.rx.get_mut().unwrap().recv() {
+                Ok(c) => {
+                    self.chunk = c;
+                    self.pos = 0;
+                }
+                Err(_) => {
+                    self.ended.store(true, Ordering::SeqCst);
+                    return Ok(0);
+                }
+            }
+        }
+        let n = buf.len().min(self.chunk.len() - self.pos);
+        buf[..n].copy_from_slice(&self.chunk[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+impl Seek for StreamReader {
     fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
