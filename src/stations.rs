@@ -109,8 +109,16 @@ mod tests {
     fn every_station_uses_the_ad_free_stream_variant() {
         assert_eq!(STATIONS.len(), 13);
         for st in STATIONS {
-            assert!(st.stream_url.starts_with("https://icecast.radiofrance.fr/"), "{}", st.name);
-            assert!(st.stream_url.ends_with("-hifi.aac?id=radiofrance"), "{}", st.name);
+            assert!(
+                st.stream_url.starts_with("https://icecast.radiofrance.fr/"),
+                "{}",
+                st.name
+            );
+            assert!(
+                st.stream_url.ends_with("-hifi.aac?id=radiofrance"),
+                "{}",
+                st.name
+            );
         }
     }
 
@@ -121,7 +129,11 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 12);
-        let missing: Vec<&str> = STATIONS.iter().filter(|s| s.livemeta_id.is_none()).map(|s| s.name).collect();
+        let missing: Vec<&str> = STATIONS
+            .iter()
+            .filter(|s| s.livemeta_id.is_none())
+            .map(|s| s.name)
+            .collect();
         assert_eq!(missing, ["FIP Cultes"]);
     }
 }

@@ -167,7 +167,10 @@ impl Session {
                 }
             }
             Err(e) => {
-                eprintln!("audio: cannot open stream ({url}): {e}, retrying in {:?}", self.backoff);
+                eprintln!(
+                    "audio: cannot open stream ({url}): {e}, retrying in {:?}",
+                    self.backoff
+                );
                 // Leave `ended` set so the watchdog keeps retrying (with backoff).
                 self.ended.store(true, Ordering::SeqCst);
                 self.next_retry = Instant::now() + self.backoff;
@@ -194,7 +197,12 @@ fn play_stream(
         .spawn(move || fetch(reader, tx))?;
 
     // Prebuffer: fill the jitter margin before handing the stream to rodio.
-    let mut stream = StreamReader { rx: Mutex::new(rx), chunk: Vec::new(), pos: 0, ended };
+    let mut stream = StreamReader {
+        rx: Mutex::new(rx),
+        chunk: Vec::new(),
+        pos: 0,
+        ended,
+    };
     let deadline = Instant::now() + PREBUFFER_TIMEOUT;
     while stream.chunk.len() < PREBUFFER {
         let left = deadline.saturating_duration_since(Instant::now());

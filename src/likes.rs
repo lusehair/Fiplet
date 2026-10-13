@@ -102,14 +102,29 @@ mod tests {
 
     #[test]
     fn like_key_matches_now_playing_key_case_insensitively() {
-        let like = Like { title: "So What".into(), artist: "MILES Davis".into(), station: "FIP".into(), liked_at_unix: 0 };
-        let np = NowPlaying { title: "so what".into(), artist: "miles davis".into(), station_index: 0, cover_url: None };
+        let like = Like {
+            title: "So What".into(),
+            artist: "MILES Davis".into(),
+            station: "FIP".into(),
+            liked_at_unix: 0,
+        };
+        let np = NowPlaying {
+            title: "so what".into(),
+            artist: "miles davis".into(),
+            station_index: 0,
+            cover_url: None,
+        };
         assert_eq!(like.key(), np.dedup_key());
     }
 
     #[test]
     fn likes_json_round_trip() {
-        let likes = vec![Like { title: "T".into(), artist: "A".into(), station: "FIP".into(), liked_at_unix: 42 }];
+        let likes = vec![Like {
+            title: "T".into(),
+            artist: "A".into(),
+            station: "FIP".into(),
+            liked_at_unix: 42,
+        }];
         let json = serde_json::to_vec(&likes).unwrap();
         let back: Vec<Like> = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.len(), 1);

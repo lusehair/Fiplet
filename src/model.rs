@@ -65,8 +65,18 @@ mod tests {
 
     #[test]
     fn dedup_key_is_case_insensitive() {
-        let a = NowPlaying { title: "Blue In Green".into(), artist: "Miles DAVIS".into(), station_index: 0, cover_url: None };
-        let b = NowPlaying { title: "blue in green".into(), artist: "miles davis".into(), station_index: 3, cover_url: None };
+        let a = NowPlaying {
+            title: "Blue In Green".into(),
+            artist: "Miles DAVIS".into(),
+            station_index: 0,
+            cover_url: None,
+        };
+        let b = NowPlaying {
+            title: "blue in green".into(),
+            artist: "miles davis".into(),
+            station_index: 3,
+            cover_url: None,
+        };
         assert_eq!(a.dedup_key(), b.dedup_key());
     }
 }

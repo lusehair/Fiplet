@@ -9,8 +9,8 @@
 //!    `livemeta` does not serve, and as a fallback whenever `livemeta` fails.
 
 use std::fmt;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -126,7 +126,11 @@ fn run(events: Sender<AppEvent>, initial: usize, rx: mpsc::Receiver<MetaCmd>) {
                             .and_then(fetch_bytes)
                             .or_else(|| fetch_cover(&artist, &title));
                         if let Some(jpeg) = jpeg {
-                            let _ = events2.send(AppEvent::Cover { station_index: si, key, jpeg });
+                            let _ = events2.send(AppEvent::Cover {
+                                station_index: si,
+                                key,
+                                jpeg,
+                            });
                         }
                     });
                 }
@@ -343,7 +347,10 @@ fn fetch_live(station: usize) -> LiveResult {
         match fetch_livemeta(id, station) {
             Ok(r) => return Ok(r),
             Err(e) if token.is_empty() => return Err(e),
-            Err(e) => eprintln!("metadata: livemeta ({}): {e} — falling back to GraphQL", STATIONS[station].name),
+            Err(e) => eprintln!(
+                "metadata: livemeta ({}): {e} — falling back to GraphQL",
+                STATIONS[station].name
+            ),
         }
     }
     if token.is_empty() {
@@ -368,9 +375,8 @@ fn fetch_livemeta(id: u32, station: usize) -> LiveResult {
 
 fn fetch_graphql(station: usize, token: &str) -> LiveResult {
     let api = STATIONS[station].api_station;
-    let query = format!(
-        "{{ live(station: {api}) {{ song {{ end track {{ title mainArtists }} }} }} }}"
-    );
+    let query =
+        format!("{{ live(station: {api}) {{ song {{ end track {{ title mainArtists }} }} }} }}");
 
     let mut resp = http()
         .post(config::GRAPHQL_ENDPOINT)
@@ -386,15 +392,18 @@ fn fetch_graphql(station: usize, token: &str) -> LiveResult {
     // answers HTTP 200 with `errors` on some deployments).
     if let (None, Some(err)) = (&live, parsed.errors.first()) {
         let m = err.message.to_ascii_lowercase();
-        return Err(if m.contains("token") || m.contains("unauthor") || m.contains("forbidden") {
-            LiveError::Unauthorized(200)
-        } else {
-            LiveError::Graphql(err.message.clone())
-        });
+        return Err(
+            if m.contains("token") || m.contains("unauthor") || m.contains("forbidden") {
+                LiveError::Unauthorized(200)
+            } else {
+                LiveError::Graphql(err.message.clone())
+            },
+        );
     }
-    let Some(track) = live.and_then(|l| l.song).and_then(|song| {
-        song.track.map(|t| (t, song.end))
-    }) else {
+    let Some(track) = live
+        .and_then(|l| l.song)
+        .and_then(|song| song.track.map(|t| (t, song.end)))
+    else {
         return Ok(None);
     };
     let (track, end) = track;
@@ -431,7 +440,10 @@ mod tests {
     fn poll_delay_is_bounded_and_falls_back() {
         assert_eq!(poll_delay(None, 1000), FALLBACK_POLL);
         assert_eq!(poll_delay(Some(900), 1000), FALLBACK_POLL);
-        assert_eq!(poll_delay(Some(1010), 1000), Duration::from_secs(10) + END_MARGIN);
+        assert_eq!(
+            poll_delay(Some(1010), 1000),
+            Duration::from_secs(10) + END_MARGIN
+        );
         assert_eq!(poll_delay(Some(1000 + 36_000), 1000), MAX_WAIT);
     }
 
@@ -442,9 +454,15 @@ mod tests {
         )
         .unwrap();
         let (np, end) = song.now.unwrap().into_now_playing(2).unwrap();
-        assert_eq!((np.title.as_str(), np.artist.as_str(), np.station_index), ("Nica's tempo", "Art Blakey", 2));
+        assert_eq!(
+            (np.title.as_str(), np.artist.as_str(), np.station_index),
+            ("Nica's tempo", "Art Blakey", 2)
+        );
         assert_eq!(end, Some(99));
-        assert_eq!(np.cover_url.as_deref(), Some("https://www.radiofrance.fr/pikapi/images/a1e7/600x600?webp=false"));
+        assert_eq!(
+            np.cover_url.as_deref(),
+            Some("https://www.radiofrance.fr/pikapi/images/a1e7/600x600?webp=false")
+        );
 
         let idle: LivemetaResp = serde_json::from_str(
             r#"{"now":{"firstLine":"FIP","secondLine":"Le direct","thirdLine":null,"cover":"34e9","startTime":null,"endTime":null}}"#,
@@ -461,9 +479,21 @@ mod tests {
             r#"{"data":{"live":{"song":{"end":1,"track":{"title":null,"mainArtists":null}}}}}"#,
         )
         .unwrap();
-        assert!(r.data.unwrap().live.unwrap().song.unwrap().track.unwrap().title.is_none());
+        assert!(
+            r.data
+                .unwrap()
+                .live
+                .unwrap()
+                .song
+                .unwrap()
+                .track
+                .unwrap()
+                .title
+                .is_none()
+        );
         let r: GqlResp =
-            serde_json::from_str(r#"{"data":null,"errors":[{"message":"Invalid token"}]}"#).unwrap();
+            serde_json::from_str(r#"{"data":null,"errors":[{"message":"Invalid token"}]}"#)
+                .unwrap();
         assert_eq!(r.errors[0].message, "Invalid token");
     }
 }

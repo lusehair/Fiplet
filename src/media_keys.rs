@@ -35,7 +35,9 @@ pub fn install(tx: Sender<AppEvent>) {
         // as a toggle would start playback when already paused.
         register(&center.playCommand(), tx.clone(), || AppEvent::MediaPlay);
         register(&center.pauseCommand(), tx.clone(), || AppEvent::MediaPause);
-        register(&center.nextTrackCommand(), tx.clone(), || AppEvent::MediaNext);
+        register(&center.nextTrackCommand(), tx.clone(), || {
+            AppEvent::MediaNext
+        });
         register(&center.previousTrackCommand(), tx, || AppEvent::MediaPrev);
     }
     std::mem::forget(center);

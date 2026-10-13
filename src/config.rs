@@ -139,7 +139,10 @@ mod tests {
         let path = dir.join("settings.json");
         write_atomic(&path, b"{\"token\":\"x\"}").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"token\":\"x\"}");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert!(!path.with_extension("tmp").exists());
         // Overwrite keeps the file private and replaces the content wholesale.
         write_atomic(&path, b"{}").unwrap();

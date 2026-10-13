@@ -11,11 +11,7 @@ static IS_FRENCH: OnceLock<bool> = OnceLock::new();
 
 /// Returns `fr` if the OS UI language is French, otherwise `en`.
 pub fn tr(fr: &'static str, en: &'static str) -> &'static str {
-    if is_french() {
-        fr
-    } else {
-        en
-    }
+    if is_french() { fr } else { en }
 }
 
 /// True if the user's preferred OS language is French (cached after first call).

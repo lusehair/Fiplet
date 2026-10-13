@@ -11,7 +11,7 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2::{
-    define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
@@ -376,8 +376,11 @@ impl Controller {
             }
         }
 
-        iv.fav_item
-            .setTitle(&s(&format!("{} ({})", tr("Favoris", "Favorites"), favs.len())));
+        iv.fav_item.setTitle(&s(&format!(
+            "{} ({})",
+            tr("Favoris", "Favorites"),
+            favs.len()
+        )));
     }
 
     /// Handles a click on a favorite row. A single click copies the favorite
@@ -452,9 +455,9 @@ impl Controller {
             iv.play_btn.setTitle(&s("▶"));
         } else {
             // Resume: reconnect to the live stream to resync audio and track.
-            let _ = iv
-                .audio_tx
-                .send(AudioCmd::PlayStream(STATIONS[station].stream_url.to_string()));
+            let _ = iv.audio_tx.send(AudioCmd::PlayStream(
+                STATIONS[station].stream_url.to_string(),
+            ));
             iv.play_btn.setTitle(&s("⏸"));
             self.refresh_meta(station);
         }
@@ -472,8 +475,11 @@ impl Controller {
                 if show {
                     iv.name.setStringValue(&s(STATIONS[np.station_index].name));
                     iv.title.setStringValue(&s(&np.title));
-                    iv.artist
-                        .setStringValue(&s(if np.artist.is_empty() { "—" } else { &np.artist }));
+                    iv.artist.setStringValue(&s(if np.artist.is_empty() {
+                        "—"
+                    } else {
+                        &np.artist
+                    }));
                     iv.cover.setHidden(true);
                     iv.cover.setImage(None);
                     {
@@ -503,7 +509,11 @@ impl Controller {
                     self.update_now_playing();
                 }
             }
-            AppEvent::Cover { station_index, key, jpeg } => {
+            AppEvent::Cover {
+                station_index,
+                key,
+                jpeg,
+            } => {
                 // Only apply a cover to the track it was fetched for: a slow
                 // download must not land on the next track (or on the same
                 // station after an A→B→A switch).
@@ -525,8 +535,10 @@ impl Controller {
             }
             AppEvent::StreamOffline => {
                 if !iv.state.borrow().paused {
-                    iv.title
-                        .setStringValue(&s(tr("Hors ligne — reconnexion…", "Offline — reconnecting…")));
+                    iv.title.setStringValue(&s(tr(
+                        "Hors ligne — reconnexion…",
+                        "Offline — reconnecting…",
+                    )));
                     iv.artist.setStringValue(&s(""));
                 }
             }
@@ -535,7 +547,10 @@ impl Controller {
                 let station = iv.state.borrow().current_station;
                 self.refresh_meta(station);
             }
-            AppEvent::ApiError { unauthorized, detail } => {
+            AppEvent::ApiError {
+                unauthorized,
+                detail,
+            } => {
                 eprintln!("metadata: {detail}");
                 if !iv.state.borrow().paused {
                     iv.title.setStringValue(&s(if unauthorized {
@@ -706,8 +721,9 @@ pub fn run() {
     // a single submenu item, so rows can be double-clicked without the menu
     // closing. Populated by rebuild_fav_menu.
     let fav_menu = NSMenu::new(mtm);
-    let fav_view: Retained<FlippedView> =
-        unsafe { msg_send![mtm.alloc::<FlippedView>(), initWithFrame: rect(0.0, 0.0, 260.0, FAV_ROW_H)] };
+    let fav_view: Retained<FlippedView> = unsafe {
+        msg_send![mtm.alloc::<FlippedView>(), initWithFrame: rect(0.0, 0.0, 260.0, FAV_ROW_H)]
+    };
     let fav_host = NSMenuItem::new(mtm);
     let fav_view_ref: &NSView = &fav_view;
     fav_host.setView(Some(fav_view_ref));
@@ -936,9 +952,8 @@ fn launched_as_login_item() -> bool {
 fn make_artwork(img: &Retained<NSImage>) -> Retained<MPMediaItemArtwork> {
     let size = img.size();
     let img_for_block = img.clone();
-    let handler = RcBlock::new(move |_size: NSSize| -> NonNull<NSImage> {
-        NonNull::from(&*img_for_block)
-    });
+    let handler =
+        RcBlock::new(move |_size: NSSize| -> NonNull<NSImage> { NonNull::from(&*img_for_block) });
     unsafe {
         MPMediaItemArtwork::initWithBoundsSize_requestHandler(
             MPMediaItemArtwork::alloc(),
